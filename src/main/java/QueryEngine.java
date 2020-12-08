@@ -26,18 +26,24 @@ public class QueryEngine {
     boolean indexExists;
     private static String inputFiles = "src/main/resources/wiki-subset-20140602";
     private static String questions = "src/main/resources/questions.txt";
-    private static String questionIndex = "question-index";
 
     IndexWriter writer;
     Analyzer analyzer;
 
+    /**
+     * Creates a QueryEngine instance that is used to index documents and retrieve queries
+     * @param indexExist Command line argument, determines whether to build or skip building index
+     * @throws IOException
+     */
     public QueryEngine(String indexExist) throws IOException {
+        //Create the analyzer with porter stemmer and stop word removal
         analyzer = CustomAnalyzer.builder()
                 .withTokenizer("standard")
                 .addTokenFilter("lowercase")
                 .addTokenFilter("stop")
                 .addTokenFilter("porterstem")
                 .build();
+
 
         if (indexExist.equals("1")) {
             indexExists = true;
@@ -55,6 +61,12 @@ public class QueryEngine {
 
     }
 
+    /**
+     * Given a .txt file that contain multiple wiki pages, parse them individually and create documents
+     * to store in the Lucene index
+     * @param file The .txt to parse
+     * @throws IOException
+     */
     private void parseFile(File file) throws IOException {
         Scanner sc = null;
         try {
@@ -62,17 +74,27 @@ public class QueryEngine {
         } catch (FileNotFoundException e) {
             e.printStackTrace();
         }
+        // The current document we are on
         Document cur = null;
+        // To append text to line by line
         StringBuilder text = new StringBuilder();
         StringBuilder summary = new StringBuilder();
+
+        // Determines if we are still in the summary section of the wiki page
         boolean onSummary = true;
+
+        // Go through each line
         while (sc.hasNextLine()) {
             String line = sc.nextLine();
+            // Skip file attachments
             if (line.contains("[[File:")) {
                 continue;
             }
+
+            // If we are on a new wiki document
             if (line.length() > 4 && line.charAt(0) == '[' && line.charAt(1) == '[' &&
                     line.charAt(line.length()-1) == ']' && line.charAt(line.length()-2) == ']') {
+                // Add the previous tracked document
                 if (cur != null) {
                     String toAdd = text.toString();
                     String sumAdd = summary.toString();
@@ -83,16 +105,19 @@ public class QueryEngine {
                     writer.addDocument(cur);
                     onSummary = true;
                 }
+                // Create the new document that starts on this line
                 cur = new Document();
                 text = new StringBuilder();
                 summary = new StringBuilder();
                 cur.add(new StringField("docid", line.substring(2, line.length()-2), Field.Store.YES));
             } else {
                 if (cur != null && line.length() > 2) {
+                    // If we are no longer on the summary section
                     if (line.charAt(0) == '=' && line.charAt(1) == '=') {
                         onSummary = false;
                         continue;
                     }
+                    // If we are on the categories section
                     if (line.contains("CATEGORIES:")) {
                         cur.add(new TextField("cat", line.replace("CATEGORIES: ", ""), Field.Store.YES));
                         continue;
@@ -106,11 +131,17 @@ public class QueryEngine {
             }
         }
 
+        // Add the last document that was being tracked
         String toAdd = QueryParser.escape(text.toString());
         cur.add(new TextField("text", toAdd, Field.Store.YES));
         writer.addDocument(cur);
     }
 
+    /**
+     * Builds the Lucene index
+     * @throws IOException
+     * @throws InterruptedException
+     */
     private void buildIndex() throws IOException, InterruptedException {
         File documents = new File(inputFiles);
 
@@ -126,6 +157,9 @@ public class QueryEngine {
 
         File[] files = documents.listFiles();
 
+        // Create 2 threads so building index goes faster
+
+        //Thread1 does the first half of the text files
         Thread thread1 = new Thread(() -> {
             for (int i = 0; i < t1; i++) {
                 try {
@@ -136,6 +170,7 @@ public class QueryEngine {
             }
         });
 
+        //Thread 2 does the second half
         Thread thread2 = new Thread(() -> {
            for (int i = t1; i < files.length; i++) {
                try {
@@ -156,6 +191,12 @@ public class QueryEngine {
         indexExists = true;
     }
 
+    /**
+     * Using a text file of questions, use the query with the Index and retrieve top 1 answer
+     * @param questions The .txt file formatted for questions
+     * @throws IOException
+     * @throws ParseException
+     */
     private void answerQuestions(File questions) throws IOException, ParseException {
         System.out.println("ANSWERING QUESTIONS");
         Scanner sc = new Scanner(questions);
@@ -164,31 +205,36 @@ public class QueryEngine {
         IndexSearcher searcher = new IndexSearcher(reader);
         searcher.setSimilarity(new CosineScore());
 
+        // To compare correct answers and retrieved responses
         List<String> answers = new LinkedList<>();
         List<java.lang.String> responses = new LinkedList<>();
 
+        // Determines which line we are on in the file
         int i = 0;
-        int num = 0;
-        MultiFieldQueryParser queryParser = new MultiFieldQueryParser(new String[]{"summary", "text"}, analyzer);
-        QueryParser summaryParser = new QueryParser("summary", analyzer);
-        QueryParser categoryParser = new QueryParser("cat", analyzer);
-        QueryParser textParser = new QueryParser("text", analyzer);
 
-        StringBuilder query = new StringBuilder();
+        // Parser that looks at both summary and text sections
+        MultiFieldQueryParser queryParser = new MultiFieldQueryParser(new String[]{"summary", "text"}, analyzer);
+
+        // Parser that looks at only category section
+        QueryParser categoryParser = new QueryParser("cat", analyzer);
+
+        // Fuzz query has tolerance for edit distance
         StringBuilder fuzzQuery = new StringBuilder();
+
+        // Query does not
+        StringBuilder query = new StringBuilder();
         int inTop20 = 0;
         ScoreDoc[] curScoreDoc = null;
         String category = "";
-        String question = "";
 
         double MRR = 0;
 
+        // Go through line by line
         while (sc.hasNextLine()) {
             String line = sc.nextLine();
             //This is a category
             if (i % 4 == 0) {
-                //Do something with categories
-//                query.append(QueryParser.escape(line)).append(" ");
+                // Process the category line to remove dialogue text
                 category = line;
                 if (category.contains("(Alex: Not")) {
                     category = category.substring(0, category.indexOf("(Alex: Not"));
@@ -200,51 +246,48 @@ public class QueryEngine {
                     category = category.substring(0, category.length() - 1);
                 }
 
-                query.append(QueryParser.escape(category)).append("~.7 ");
-                fuzzQuery.append(QueryParser.escape(category)).append(" ");
+                // Add this to the query, fuzz gets edit distance weight of .7
+                fuzzQuery.append(QueryParser.escape(category)).append("~.7 ");
+                query.append(QueryParser.escape(category)).append(" ");
             } else if (i % 4 == 1) {
-                //This is the query
+                //This is the question
                 query.append(QueryParser.escape(line));
                 fuzzQuery.append(QueryParser.escape(line));
-                question = QueryParser.escape(line);
 
+                // These are used in conjunction in the BooleanQuery object provided by Lucene.
+                Query textQuery = queryParser.parse(fuzzQuery.toString());
+                Query categoryQuery = categoryParser.parse(fuzzQuery.toString());
 
-                Query textQuery = queryParser.parse(query.toString());
-//                Query categoryQuery = categoryParser.parse(QueryParser.escape(category));
-                Query summaryQuery = summaryParser.parse(query.toString());
-                Query categoryQuery = categoryParser.parse(query.toString());
-
+                // Filters through the category query first, then uses the text query
                 BooleanQuery booleanQuery = new BooleanQuery.Builder()
                         .add(categoryQuery, BooleanClause.Occur.SHOULD)
-//                        .add(summaryQuery, BooleanClause.Occur.SHOULD)
                         .add(textQuery, BooleanClause.Occur.MUST)
                         .build();
 
-                Query fuzz = categoryParser.parse(fuzzQuery.toString());
-
-                TopDocs docs = searcher.search(booleanQuery, 1000);
-                TopDocs secondDocs = QueryRescorer.rescore(searcher, docs, fuzz, 2, 10);
+                // Re-ranks the top 10 documents with the stricter query over their categories
+                Query strict = categoryParser.parse(query.toString());
+                TopDocs docs = searcher.search(booleanQuery, 10);
+                TopDocs secondDocs = QueryRescorer.rescore(searcher, docs, strict, 2, 10);
 
                 curScoreDoc = secondDocs.scoreDocs;
-//                curScoreDoc = docs.scoreDocs;
 
 
 
                 if (docs.scoreDocs.length > 0) {
                     responses.add(searcher.doc(curScoreDoc[0].doc).getField("docid").stringValue());
-//                    responses.add(topAnswer);
                 } else {
                     System.out.println("NO ANSWER");
                     responses.add("");
                 }
 
-
+                // Reset for next question
                 query = new StringBuilder();
                 fuzzQuery = new StringBuilder();
             } else if (i % 4 == 2) {
                 //This is the answer
                 answers.add(line);
 
+                // Check if in the top K docs and compute part of MRR score
                 int pos = 1;
                 for (ScoreDoc scoreDoc : curScoreDoc) {
                     if (line.contains(searcher.doc(scoreDoc.doc).getField("docid").stringValue())) {
@@ -266,6 +309,7 @@ public class QueryEngine {
         List<String> correctAnswers = new LinkedList<>();
         List<String> incorrectAnswers = new LinkedList<>();
 
+        // Calculate correctness percentage and print out incorrect and correct answers
         for (i = 0; i < totalAnswers; i++) {
             if (answers.get(i).contains(responses.get(i))) {
                 totalRight++;
@@ -291,6 +335,12 @@ public class QueryEngine {
         System.out.println("MRR: " + MRR);
     }
 
+    /**
+     * Runs the program
+     * @param args "1" if index exists, "2" otherwise
+     * @throws IOException
+     * @throws ParseException
+     */
     public static void main(String[] args) throws IOException, ParseException {
         QueryEngine engine = new QueryEngine(args[0]);
 
