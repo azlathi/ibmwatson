@@ -1,3 +1,7 @@
+import edu.stanford.nlp.pipeline.CoreDocument;
+import edu.stanford.nlp.pipeline.CoreSentence;
+import edu.stanford.nlp.pipeline.StanfordCoreNLP;
+import edu.stanford.nlp.simple.Sentence;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.custom.CustomAnalyzer;
 import org.apache.lucene.document.Document;
@@ -30,6 +34,9 @@ public class QueryEngine {
     IndexWriter writer;
     Analyzer analyzer;
 
+    Properties prop;
+    StanfordCoreNLP pipeline;
+
     /**
      * Creates a QueryEngine instance that is used to index documents and retrieve queries
      * @param indexExist Command line argument, determines whether to build or skip building index
@@ -44,6 +51,10 @@ public class QueryEngine {
                 .addTokenFilter("porterstem")
                 .build();
 
+        prop = new Properties();
+        prop.setProperty("annotators", "tokenize,ssplit,pos,lemma");
+
+        pipeline = new StanfordCoreNLP(prop);
 
         if (indexExist.equals("1")) {
             indexExists = true;
@@ -98,6 +109,20 @@ public class QueryEngine {
                 if (cur != null) {
                     String toAdd = text.toString();
                     String sumAdd = summary.toString();
+
+                    CoreDocument textLemma = new CoreDocument(toAdd);
+                    pipeline.annotate(textLemma);
+
+                    for (CoreSentence sen : textLemma.sentences()) {
+                        cur.add(new TextField("text", String.join(" ", sen.lemmas()), Field.Store.YES));
+                    }
+
+                    CoreDocument summLemma = new CoreDocument(sumAdd);
+                    pipeline.annotate(summLemma);
+
+                    for (CoreSentence sen : summLemma.sentences()) {
+                        cur.add(new TextField("summary", String.join(" ", sen.lemmas()), Field.Store.YES));
+                    }
 
                     cur.add(new TextField("text", toAdd, Field.Store.YES));
                     cur.add(new TextField("summary", sumAdd, Field.Store.YES));
@@ -246,13 +271,22 @@ public class QueryEngine {
                     category = category.substring(0, category.length() - 1);
                 }
 
+                CoreDocument lemmaQuery = new CoreDocument(category);
+                pipeline.annotate(lemmaQuery);
+                category = String.join(" ", lemmaQuery.sentences().get(0).lemmas());
+
                 // Add this to the query, fuzz gets edit distance weight of .7
                 fuzzQuery.append(QueryParser.escape(category)).append("~.7 ");
                 query.append(QueryParser.escape(category)).append(" ");
             } else if (i % 4 == 1) {
                 //This is the question
+                CoreDocument lemmaQuery = new CoreDocument(line);
+                pipeline.annotate(lemmaQuery);
+                line = String.join(" ", lemmaQuery.sentences().get(0).lemmas());
+
                 query.append(QueryParser.escape(line));
                 fuzzQuery.append(QueryParser.escape(line));
+
 
                 // These are used in conjunction in the BooleanQuery object provided by Lucene.
                 Query textQuery = queryParser.parse(fuzzQuery.toString());
