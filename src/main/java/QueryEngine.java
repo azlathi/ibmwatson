@@ -1,3 +1,6 @@
+import edu.stanford.nlp.pipeline.CoreDocument;
+import edu.stanford.nlp.pipeline.CoreSentence;
+import edu.stanford.nlp.pipeline.StanfordCoreNLP;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.custom.CustomAnalyzer;
 import org.apache.lucene.document.Document;
@@ -229,6 +232,11 @@ public class QueryEngine {
 
         double MRR = 0;
 
+        // For lemmatization
+        Properties prop = new Properties();
+        prop.setProperty("annotators", "tokenize,ssplit,pos,lemma");
+        StanfordCoreNLP pipeline = new StanfordCoreNLP(prop);
+
         // Go through line by line
         while (sc.hasNextLine()) {
             String line = sc.nextLine();
@@ -265,20 +273,98 @@ public class QueryEngine {
                         .build();
 
                 // Re-ranks the top 10 documents with the stricter query over their categories
-                Query strict = categoryParser.parse(query.toString());
                 TopDocs docs = searcher.search(booleanQuery, 10);
-                TopDocs secondDocs = QueryRescorer.rescore(searcher, docs, strict, 2, 10);
 
-                curScoreDoc = secondDocs.scoreDocs;
+                // For the language model over top 10 documents
+                HashMap<String, List<String>> doc_lemma = new HashMap<>();
+                HashMap<String, Integer> word_count = new HashMap<>();
+                int collection_count = 0;
+
+                curScoreDoc = docs.scoreDocs;
+
+                for (ScoreDoc doc : curScoreDoc) {
+                    String text = searcher.doc(doc.doc).getField("text").stringValue();
+                    CoreDocument lemmatized = new CoreDocument(text);
+                    pipeline.annotate(lemmatized);
+                    List<String> lemmas = new LinkedList<>();
+                    for (CoreSentence sen : lemmatized.sentences()) {
+                        for (String token : sen.lemmas()) {
+                            if (word_count.containsKey(token)) {
+                                word_count.put(token, word_count.get(token) + 1);
+                            } else {
+                                word_count.put(token, 1);
+                            }
+                            lemmas.add(token);
+                        }
+                        collection_count += sen.lemmas().size();
+                    }
+
+                    text = searcher.doc(doc.doc).getField("summary").stringValue();
+                    lemmatized = new CoreDocument(text);
+                    pipeline.annotate(lemmatized);
+                    for (CoreSentence sen : lemmatized.sentences()) {
+                        for (String token : sen.lemmas()) {
+                            if (word_count.containsKey(token)) {
+                                word_count.put(token, word_count.get(token) + 1);
+                            } else {
+                                word_count.put(token, 1);
+                            }
+                            lemmas.add(token);
+                        }
+                        collection_count += sen.lemmas().size();
+                    }
 
 
+                    doc_lemma.put(searcher.doc(doc.doc).getField("docid").stringValue(), lemmas);
+                }
 
-                if (docs.scoreDocs.length > 0) {
+                // Run the query over the language model
+
+                String topDoc = "";
+                double topScore = -999.0;
+
+
+                CoreDocument query_lemma = new CoreDocument(query.toString());
+                pipeline.annotate(query_lemma);
+
+                for (String doc : doc_lemma.keySet()) {
+                    double thisScore = 0.0;
+
+                    for (String term : query_lemma.sentences().get(0).lemmas()) {
+                        int count = 0;
+                        for (String token : doc_lemma.get(doc)) {
+                            if (term.equals(token)) {
+                                count++;
+                            }
+                        }
+
+                        //Apply smoothing with alpha = .5
+                        double termScore = (.5) * (double)count / (double)doc_lemma.get(doc).size();
+                        if (word_count.containsKey(term)) {
+                            termScore += (.5) * (double) word_count.get(term) / (double) collection_count;
+                        }
+
+                        thisScore += Math.log(termScore);
+                    }
+
+                    if (thisScore > topScore) {
+                        topScore = thisScore;
+                        topDoc = doc;
+                    }
+                }
+
+                if (topDoc.equals("")) {
                     responses.add(searcher.doc(curScoreDoc[0].doc).getField("docid").stringValue());
                 } else {
-                    System.out.println("NO ANSWER");
-                    responses.add("");
+                    responses.add(topDoc);
                 }
+
+//                if (docs.scoreDocs.length > 0) {
+//                    responses.add(searcher.doc(curScoreDoc[0].doc).getField("docid").stringValue());
+//                } else {
+//                    System.out.println("NO ANSWER");
+//                    responses.add("");
+//                }
 
                 // Reset for next question
                 query = new StringBuilder();
